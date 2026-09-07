@@ -1,1 +1,76 @@
+name: Daily publish
 
+on:
+  schedule:
+    - cron: "0 8 * * *"   # 08:00 UTC every day — edit to taste
+  workflow_dispatch: {}    # lets you trigger it manually from the Actions tab
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pages: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install -r requirements.txt
+
+      - name: Step 1 — generate today's image + build the site
+        working-directory: scripts
+        run: python daily_publish.py build
+
+      - name: Commit + push (triggers the Pages deployment)
+        id: commit1
+        run: |
+          git config user.name "girl-in-the-mirror-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add content/story.json docs/
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            git commit -m "Build day $(date -u +%Y-%m-%d)"
+            git push
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Wait for GitHub Pages to finish deploying
+        if: steps.commit1.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          repo="${{ github.repository }}"
+          echo "Polling https://api.github.com/repos/$repo/pages/builds/latest"
+          for i in $(seq 1 20); do
+            status=$(curl -s -H "Authorization: Bearer $GH_TOKEN" \
+              "https://api.github.com/repos/$repo/pages/builds/latest" | \
+              python3 -c "import sys,json; print(json.load(sys.stdin).get('status','unknown'))")
+            echo "Attempt $i: pages build status = $status"
+            if [ "$status" = "built" ]; then
+              echo "Pages is live. Sleeping 15s extra for CDN propagation."
+              sleep 15
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "Gave up waiting for Pages to report 'built' — continuing anyway."
+
+      - name: Step 2 — publish to Instagram
+        working-directory: scripts
+        env:
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+        run: python daily_publish.py instagram
+
+      - name: Commit + push (marks the day published)
+        run: |
+          git config user.name "girl-in-the-mirror-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add content/story.json
+          git diff --cached --quiet || git commit -m "Mark day $(date -u +%Y-%m-%d) published"
+          git pull --rebase
+          git push
