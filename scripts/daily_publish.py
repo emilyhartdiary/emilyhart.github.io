@@ -28,10 +28,12 @@ Environment variables used:
   IG_ACCESS_TOKEN Long-lived Instagram User access token
   DRY_RUN         set to "1" to skip the actual Instagram call
 """
+import html
 import json
 import os
+import re
 import sys
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
@@ -80,13 +82,33 @@ INDEX_TEMPLATE = """<!DOCTYPE html>
 <header><h1>The Girl in the Mirror</h1>
 <p class="tagline">Emily Hart is a fictional character. This is a fictional diary. Photos are AI-generated.</p></header>
 <main>
-<ul class="post-list">
+<div class="post-grid">
 {entries}
-</ul>
+</div>
 </main>
 </body>
 </html>
 """
+
+CARD_TEMPLATE = """<article class="post-card">
+<a href="posts/day-{day:03d}.html">
+<img src="images/{image_file}" alt="">
+<div class="post-card-body">
+<h2>{title}</h2>
+<p class="meta">{date}</p>
+<p class="excerpt">{excerpt}</p>
+</div>
+</a>
+</article>"""
+
+
+def excerpt_from_html(body_html: str, max_chars: int = 160) -> str:
+    text = re.sub(r"<[^>]+>", " ", body_html)
+    text = html.unescape(text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > max_chars:
+        text = text[:max_chars].rsplit(" ", 1)[0] + "…"
+    return html.escape(text)
 
 
 def load_config() -> dict:
@@ -135,17 +157,26 @@ def write_post_html(entry: dict, published_date: str):
     print(f"Wrote {path}")
 
 
-def rebuild_index(days: list, up_to_day: int):
+def rebuild_index(days: list, up_to_day: int, start_date_str: str):
     # Include today's day even before it's marked published, so the site
     # goes live with it BEFORE we ask Instagram to fetch the image from it.
     visible = [d for d in days if d.get("published") or d["day"] == up_to_day]
     visible.sort(key=lambda d: d["day"], reverse=True)
-    items = "\n".join(
-        f'<li><a href="posts/day-{d["day"]:03d}.html">{d["title"]}</a></li>'
-        for d in visible
-    )
+
+    start = date.fromisoformat(start_date_str)
+    cards = []
+    for d in visible:
+        post_date = (start + timedelta(days=d["day"] - 1)).isoformat()
+        cards.append(CARD_TEMPLATE.format(
+            day=d["day"],
+            image_file=d["image_file"],
+            title=d["title"],
+            date=post_date,
+            excerpt=excerpt_from_html(d["body_html"]),
+        ))
+
     (DOCS_DIR / "index.html").write_text(
-        INDEX_TEMPLATE.format(entries=items or "<li>Nothing published yet.</li>"),
+        INDEX_TEMPLATE.format(entries="\n".join(cards) or '<p class="meta">Nothing published yet.</p>'),
         encoding="utf-8",
     )
     print(f"Rebuilt index.html with {len(visible)} posts.")
@@ -171,7 +202,7 @@ def cmd_build():
 
     published_date = datetime.now(timezone.utc).date().isoformat()
     write_post_html(entry, published_date)
-    rebuild_index(days, day_number)
+    rebuild_index(days, day_number, config["start_date"])
     print(f"Build done for day {day_number}. Commit + push, then run 'instagram' once Pages has redeployed.")
 
 
